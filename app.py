@@ -1,11 +1,5 @@
 ### 〈サンプルコード｜app.py〉
 
-> 💡 **参考** app.py に統合したサンプルコード。（下部をクリックすると展開します）
-
-<details>
-<summary>UI改善はチーム活動として対象のため、参考コードに引っ張られない開発を期待！（学習のために開かずに自身で統合するのもあり！）</summary>
-
-```python
 # =============================================================
 # app.py — Tech0 Search v1.0（完成版コード）
 # ⚠️ このセルは Streamlit アプリ用のコードです。Jupyter では実行できません。
@@ -198,6 +192,3 @@ with tab_list:
 
 st.divider()
 st.caption("© 2025 PROJECT ZERO — Tech0 Search v1.0 | Powered by TF-IDF")
-```
-
-</details>
