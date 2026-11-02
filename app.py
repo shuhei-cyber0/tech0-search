@@ -1,131 +1,203 @@
+### 〈サンプルコード｜app.py〉
+
+> 💡 **参考** app.py に統合したサンプルコード。（下部をクリックすると展開します）
+
+<details>
+<summary>UI改善はチーム活動として対象のため、参考コードに引っ張られない開発を期待！（学習のために開かずに自身で統合するのもあり！）</summary>
+
+```python
 # =============================================================
-# answers/w4/ranking.py — TF-IDF 検索エンジン（W4 完成版）
-# ノートブック W4 Step 4 で作った SearchEngine クラス＋シングルトン
+# app.py — Tech0 Search v1.0（完成版コード）
+# ⚠️ このセルは Streamlit アプリ用のコードです。Jupyter では実行できません。
+#    このコードを app.py ファイルとして保存し、streamlit run app.py で起動してください。
 # =============================================================
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from datetime import datetime
-from typing import List
 
+import streamlit as st
+from database import init_db, get_all_pages, insert_page, log_search  # log_searchは発展用
+from ranking import get_engine, rebuild_index
+from crawler import crawl_url
 
-class SearchEngine:
-    """TF-IDFベースの検索エンジン（ranking.py の本体）"""
+# アプリ起動時に DB を初期化する（テーブルが未作成なら作る）
+init_db()
 
-    def __init__(self):
-        # 日本語は単語の間にスペースが無いため、既定の「単語区切り」では
-        # 「営業店DX推進レポート」が丸ごと1語になり、「DX」で検索しても一致しない。
-        # そこで analyzer="char_wb"（文字N-gram）を使い、2〜3文字のまとまりを特徴量にする。
-        # ※ 本文 Step 1〜3 の手計算デモは、仕組みを追いやすいようスペース区切りで説明している。
-        self.vectorizer = TfidfVectorizer(
-            analyzer="char_wb",  # 文字N-gram（日本語のまま扱えるようにする）
-            ngram_range=(2, 3),  # 2〜3文字のまとまり
-            max_features=5000,
-            min_df=1,
-            max_df=0.95,
-            sublinear_tf=True    # TF の対数スケーリング
-        )
-        self.tfidf_matrix = None
-        self.pages = []
-        self.is_fitted = False
+st.set_page_config(
+    page_title="Tech0 Search v1.0",
+    page_icon="🔍",
+    layout="wide"
+)
 
-    def build_index(self, pages: list):
-        """全ページの TF-IDF インデックスを構築する"""
-        if not pages:
-            return
+# ── キャッシュ付きインデックス構築 ─────────────────────────────
+@st.cache_resource
+def load_and_index():
+    """全ページを DB から読み込み TF-IDF インデックスを構築する。
+    @st.cache_resource により、アプリ起動中は一度だけ実行される。"""
+    pages = get_all_pages()
+    if pages:
+        rebuild_index(pages)
+    return pages
 
-        self.pages = pages
-        corpus = []
-        for p in pages:
-            kw = p.get("keywords", "") or ""
-            if isinstance(kw, str):
-                kw_list = [k.strip() for k in kw.split(",") if k.strip()]
+pages = load_and_index()
+engine = get_engine()
+
+# ── ヘッダー ──────────────────────────────────────────────────
+st.title("🔍 Tech0 Search v1.0")
+st.caption("PROJECT ZERO — 社内ナレッジ検索エンジン【TF-IDFランキング搭載】")
+
+with st.sidebar:
+    st.header("DB の状態")
+    st.metric("登録ページ数", f"{len(pages)} 件")
+    if st.button("🔄 インデックスを更新"):
+        st.cache_resource.clear()
+        st.rerun()
+
+# ── タブ ──────────────────────────────────────────────────────
+tab_search, tab_crawl, tab_list = st.tabs(
+    ["🔍 検索", "🤖 クローラー", "📋 一覧"]
+)
+
+# ── 検索タブ ───────────────────────────────────────────────────
+with tab_search:
+    st.subheader("キーワードで検索")
+
+    col_search, col_options = st.columns([3, 1])
+    with col_search:
+        query = st.text_input("🔍 キーワードを入力", placeholder="例: DX, AI, 融資",
+                              label_visibility="collapsed")
+    with col_options:
+        top_n = st.selectbox("表示件数", [10, 20, 50], index=0)
+
+    if query:
+        results = engine.search(query, top_n=top_n)
+        log_search(query, len(results))    # 検索するたびに自動記録
+
+        st.markdown(f"**📊 検索結果：{len(results)} 件**（TF-IDFスコア順）")
+        st.divider()
+
+        if results:
+            for i, page in enumerate(results, 1):
+                with st.container():
+                    col_rank, col_title, col_score = st.columns([0.5, 4, 1])
+                    with col_rank:
+                        # 上位3件にはメダルを表示する
+                        medal = ["🥇", "🥈", "🥉"][i - 1] if i <= 3 else str(i)
+                        st.markdown(f"### {medal}")
+                    with col_title:
+                        st.markdown(f"### {page['title']}")
+                    with col_score:
+                        # relevance_score（最終スコア）と base_score（TF-IDFのみ）を両方表示
+                        st.metric("スコア", f"{page['relevance_score']}",
+                                  delta=f"基準: {page['base_score']}")
+
+                    desc = page.get("description", "")
+                    if desc:
+                        st.markdown(f"*{desc[:200]}{'...' if len(desc) > 200 else ''}*")
+
+                    kw = page.get("keywords", "") or ""
+                    if kw:
+                        # keywords は DB から読むと list、手動で入れると "A,B,C" の文字列になる。
+                        # ranking.py と同じく、どちらでも動くようにしておく。
+                        kw_list = [k.strip() for k in kw.split(",")] if isinstance(kw, str) else list(kw)
+                        tags = " ".join([f"`{k}`" for k in kw_list[:5] if k])
+                        st.markdown(f"🏷️ {tags}")
+
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1: st.caption(f"👤 {page.get('author', '不明') or '不明'}")
+                    with col2: st.caption(f"📊 {page.get('word_count', 0)} 語")
+                    with col3: st.caption(f"📁 {page.get('category', '未分類') or '未分類'}")
+                    with col4: st.caption(f"📅 {(page.get('crawled_at', '') or '')[:10]}")
+
+                    st.markdown(f"🔗 [{page['url']}]({page['url']})")
+                    st.divider()
+        else:
+            st.info("該当するページが見つかりませんでした")
+
+# ── クローラータブ ─────────────────────────────────────────────
+import re
+
+if "crawl_results" not in st.session_state:
+    st.session_state.crawl_results = []
+
+with tab_crawl:
+    st.subheader("🤖 自動クローラー")
+
+    # st.rerun() をまたいで「登録できた」メッセージを持ち越す（W1 と同じ仕組み）
+    if st.session_state.get("registered_count"):
+        st.success(f"{st.session_state['registered_count']}件 登録完了！")
+        st.session_state["registered_count"] = 0
+    st.caption("URLを入力してクロールし、インデックスに登録する")
+
+    crawl_url_input = st.text_area(
+        "クロール対象URL",
+        placeholder="URLを改行またはスペース区切りで入力してください",
+        height=150
+    )
+
+    if st.button("🤖 クロール実行", type="primary"):
+        if crawl_url_input:
+            raw_parts = re.split(r'[\s]+', crawl_url_input.strip())
+            urls = [p for p in raw_parts if p.startswith(("http://", "https://"))]
+
+            if not urls:
+                st.error("有効なURLが見つかりませんでした")
             else:
-                kw_list = kw
+                st.write(f"🔗 {len(urls)}件のURLを処理します")
 
-            # タイトルは3倍、説明は2倍、キーワードは2倍の重みを付ける
-            text = " ".join([
-                (p.get("title", "") + " ") * 3,
-                ((p.get("description", "") or "") + " ") * 2,
-                ((p.get("full_text", "") or "") + " "),
-                (" ".join(kw_list) + " ") * 2,
-            ])
-            corpus.append(text)
+                st.session_state.crawl_results = []
 
-        self.tfidf_matrix = self.vectorizer.fit_transform(corpus)
-        self.is_fitted = True
+                for url in urls:
+                    with st.spinner(f"クロール中: {url}"):
+                        result = crawl_url(url)
 
-    def search(self, query: str, top_n: int = 20) -> list:
-        """TF-IDF ベースの検索を実行する"""
-        if not self.is_fitted or not query.strip():
-            return []
+                    if result and result.get('crawl_status') == 'success':
+                        st.success(f"✅ 成功: {url}")
 
-        query_vec = self.vectorizer.transform([query])
-        similarities = cosine_similarity(query_vec, self.tfidf_matrix)[0]
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            title = result.get('title', '')
+                            st.metric("📄 タイトル", (title[:30] + "...") if len(title) > 30 else title)
+                        with col2:
+                            st.metric("📊 文字数", f"{result.get('word_count', 0)}語")
 
-        results = []
-        for idx, base_score in enumerate(similarities):
-            if base_score > 0.01:
-                page = self.pages[idx].copy()
-                final_score = self._calculate_final_score(page, base_score, query)
-                page["relevance_score"] = round(float(final_score) * 100, 1)
-                page["base_score"] = round(float(base_score) * 100, 1)
-                results.append(page)
+                        st.session_state.crawl_results.append(result)
+                    else:
+                        st.error(f"❌ 失敗: {url}")
 
-        results.sort(key=lambda x: x["relevance_score"], reverse=True)
-        return results[:top_n]
+    if st.session_state.crawl_results:
+        st.info(f"{len(st.session_state.crawl_results)}件のクロール結果を登録できます。")
 
-    def _calculate_final_score(self, page: dict, base_score: float, query: str) -> float:
-        """タイトルマッチ・新鮮度・文字数を加味した最終スコア"""
-        score = base_score
-        query_lower = query.lower()
+        if st.button("💾 全てインデックスに登録"):
+            total = len(st.session_state.crawl_results)
 
-        # 1. タイトルマッチボーナス
-        title = (page.get("title", "") or "").lower()
-        if query_lower == title:
-            score *= 1.8
-        elif query_lower in title:
-            score *= 1.4
+            progress_text = st.empty()
+            progress_bar = st.progress(0)
 
-        # 2. キーワードマッチボーナス
-        keywords = page.get("keywords", []) or []
-        if isinstance(keywords, str):
-            keywords = keywords.split(",")
-        if query_lower in [k.strip().lower() for k in keywords]:
-            score *= 1.3
+            for i, r in enumerate(st.session_state.crawl_results, start=1):
+                progress_text.write(f"📥 {i} / {total} 件登録中...")
+                insert_page(r)
+                progress_bar.progress(i / total)
 
-        # 3. 新鮮度ボーナス（90日以内は最大 +20%）
-        crawled_at = page.get("crawled_at", "") or ""
-        if crawled_at:
-            try:
-                crawled = datetime.fromisoformat(crawled_at.replace("Z", "+00:00"))
-                days_old = (datetime.now() - crawled.replace(tzinfo=None)).days
-                if days_old <= 90:
-                    score *= 1 + (0.2 * (90 - days_old) / 90)
-            except Exception:
-                pass
+            st.session_state["registered_count"] = total   # 件数を印として残す
+            st.session_state.crawl_results = []
+            st.cache_resource.clear()
+            st.rerun()
 
-        # 4. 文字数による調整
-        word_count = page.get("word_count", 0) or 0
-        if word_count < 50:
-            score *= 0.7
-        elif word_count > 10000:
-            score *= 0.85
+# ── 一覧タブ ───────────────────────────────────────────────────
+with tab_list:
+    st.subheader(f"📋 登録済みページ一覧（{len(pages)} 件）")
+    if not pages:
+        st.info("登録されているページがありません。クローラータブからページを追加してください。")
+    else:
+        for page in pages:
+            with st.expander(f"📄 {page['title']}"):
+                st.markdown(f"**URL：** {page['url']}")
+                st.markdown(f"**説明：** {page.get('description', '（なし）') or '（なし）'}")
+                col1, col2, col3 = st.columns(3)
+                with col1: st.caption(f"語数：{page.get('word_count', 0)}")
+                with col2: st.caption(f"作成者：{page.get('author', '不明') or '不明'}")
+                with col3: st.caption(f"カテゴリ：{page.get('category', '未分類') or '未分類'}")
 
-        return score
+st.divider()
+st.caption("© 2025 PROJECT ZERO — Tech0 Search v1.0 | Powered by TF-IDF")
+```
 
-
-# ── シングルトン（アプリ全体で1つのエンジンを使いまわす） ──
-_engine = None
-
-
-def get_engine() -> SearchEngine:
-    """検索エンジンのシングルトンを取得する"""
-    global _engine
-    if _engine is None:
-        _engine = SearchEngine()
-    return _engine
-
-
-def rebuild_index(pages: List[dict]):
-    """インデックスを再構築する（ページ追加時に呼び出す）"""
-    get_engine().build_index(pages)
+</details>
